@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,6 +37,11 @@ const (
 
 // maxResponseBytes bounds how much of an upstream response is read.
 const maxResponseBytes = 4 << 20
+
+// defaultHTTPClientTimeout is a belt-and-suspenders ceiling for the default
+// http.Client. Per-request contexts provide the real bounds; this only
+// guarantees that a misconfigured call can never hang forever.
+const defaultHTTPClientTimeout = 60 * time.Second
 
 var referencePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
@@ -224,7 +230,7 @@ func WithMaxParallelRoutes(n int) Option {
 // read. Use [NewFromEnv] for environment-driven configuration.
 func New(opts ...Option) (*Client, error) {
 	c := &Client{
-		httpClient:       &http.Client{},
+		httpClient:       &http.Client{Timeout: defaultHTTPClientTimeout},
 		logger:           slog.New(slog.DiscardHandler),
 		primaryURL:       DefaultPrimaryURL,
 		proxyTimeout:     DefaultProxyTimeout,
@@ -323,24 +329,30 @@ func (c *Client) fetchPrimary(ctx context.Context, reference string) (*Receipt, 
 // fetchRoute performs one relay attempt, following the reference
 // implementation's outcome mapping:
 //   - (*Receipt, nil): relay produced a receipt (JSON or scraped HTML);
-//   - (nil, errRejected): relay refused the request without a domain reason
+//   - (nil, requestRejectedError): relay refused the request without a domain reason
 //     (e.g. HTTP 404); the pool simply moves on;
 //   - (nil, *VerificationError with kind ErrorDomain): relay explicitly
 //     reported a domain failure such as "receipt not found";
 //   - (nil, *VerificationError with kind ErrorTransport): network-level failure.
 func (c *Client) fetchRoute(ctx context.Context, route Route, reference string) (*Receipt, error) {
-	url := route.URL + reference
+	endpoint := route.URL + reference
 	if c.proxyKey != "" {
-		url += "&key=" + c.proxyKey
+		// Query-style relay prefixes already carry "?", path-style ones do
+		// not; pick the separator accordingly and keep the key URL-safe.
+		separator := "?"
+		if strings.Contains(route.URL, "?") {
+			separator = "&"
+		}
+		endpoint += separator + "key=" + url.QueryEscape(c.proxyKey)
 	}
 
 	headers := map[string]string{
 		"Accept":     "application/json",
 		"User-Agent": "VerifierAPI/1.0",
 	}
-	body, err := c.get(ctx, url, headers)
+	body, err := c.get(ctx, endpoint, headers)
 	if err != nil {
-		var rejected errRejected
+		var rejected requestRejectedError
 		switch {
 		case errors.As(err, &rejected):
 			// Relay refused the lookup without a domain reason; the pool
@@ -389,7 +401,7 @@ func (c *Client) startAttempt(attemptCtx context.Context, route Route, reference
 			latencyMS: time.Since(startedAt).Milliseconds(),
 		}
 		var (
-			rejected  errRejected
+			rejected  requestRejectedError
 			domainErr *VerificationError
 		)
 		switch {
@@ -530,7 +542,9 @@ func (c *Client) verifyViaRoutes(ctx context.Context, reference string) (*Receip
 
 // Probe verifies the reference against every configured relay in parallel and
 // reports per-route operational status, mirroring a status-page health probe.
-// The primary source is never consulted and circuit state is untouched.
+// The primary source is never consulted and circuit state is untouched. Each
+// attempt is bounded by the configured proxy timeout so a hung relay cannot
+// stall the probe.
 func (c *Client) Probe(ctx context.Context, reference string) ProbeDetails {
 	routes := c.routes
 	results := make([]RouteStatus, len(routes))
@@ -538,10 +552,14 @@ func (c *Client) Probe(ctx context.Context, reference string) ProbeDetails {
 	var wg sync.WaitGroup
 	for i, route := range routes {
 		wg.Add(1)
-		go func(i int, route Route) {
+		go func() {
 			defer wg.Done()
+
+			attemptCtx, cancel := context.WithTimeout(ctx, c.proxyTimeout)
+			defer cancel()
+
 			startedAt := time.Now()
-			receipt, _ := c.fetchRoute(ctx, route, reference)
+			receipt, _ := c.fetchRoute(attemptCtx, route, reference)
 
 			status := RouteStatus{
 				ID:        route.ID,
@@ -554,7 +572,7 @@ func (c *Client) Probe(ctx context.Context, reference string) ProbeDetails {
 				status.Status = RouteHealthOperational
 			}
 			results[i] = status
-		}(i, route)
+		}()
 	}
 	wg.Wait()
 
@@ -572,8 +590,8 @@ func (c *Client) Probe(ctx context.Context, reference string) ProbeDetails {
 }
 
 // get issues a GET and returns the body. Non-2xx statuses become errors:
-// 5xx maps to a transport-classifiable error, other statuses to
-// [errRejected].
+// 5xx and 429 map to a transport-classifiable error, other statuses to
+// [requestRejectedError].
 func (c *Client) get(ctx context.Context, url string, headers map[string]string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -597,19 +615,22 @@ func (c *Client) get(ctx context.Context, url string, headers map[string]string)
 		return "", fmt.Errorf("read response body: %w", err)
 	}
 	switch {
-	case resp.StatusCode >= http.StatusInternalServerError:
+	// 5xx and 429 are transport-classifiable: they feed the circuit
+	// breaker instead of being silently treated as a rejection.
+	case resp.StatusCode >= http.StatusInternalServerError,
+		resp.StatusCode == http.StatusTooManyRequests:
 		return "", fmt.Errorf("upstream returned status %d", resp.StatusCode)
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return "", errRejected{status: resp.StatusCode}
+		return "", requestRejectedError{status: resp.StatusCode}
 	}
 	return string(body), nil
 }
 
-// errRejected marks a relay answer that refused the request without being a
+// requestRejectedError marks a relay answer that refused the request without being a
 // transport problem (e.g. HTTP 404 or 403).
-type errRejected struct{ status int }
+type requestRejectedError struct{ status int }
 
-func (e errRejected) Error() string {
+func (e requestRejectedError) Error() string {
 	return "request rejected with status " + strconv.Itoa(e.status)
 }
 
