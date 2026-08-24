@@ -1,0 +1,32 @@
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      # Reports only vulnerabilities in code paths this module actually calls.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  gosec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+      # .agents holds the vendored Go skills (reference examples), not product code.
+      - run: gosec -exclude-dir .agents ./...
