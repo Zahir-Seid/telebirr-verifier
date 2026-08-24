@@ -12,7 +12,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # .golangci.yml targets the golangci-lint v2 config schema.
       - uses: golangci/golangci-lint-action@v8
         with:
