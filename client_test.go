@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -25,7 +26,7 @@ func mustClient(t *testing.T, opts ...Option) *Client {
 // relayServer serves a successful JSON envelope for any reference.
 func relayServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeRelaySuccess(t, w)
 	}))
 }
@@ -58,7 +59,7 @@ const testReference = "CBJ0H74269"
 
 func primaryServer(t *testing.T, status int) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(loadFixture(t, "receipt.html")))
 	}))
@@ -242,8 +243,33 @@ func TestVerify_AppendsProxyKey(t *testing.T) {
 	}
 }
 
-func TestVerify_DomainRejectionOnly_ReturnsNotFound(t *testing.T) {
+// Regression: path-style relay prefixes (no existing "?") must receive the
+// key with a "?" separator, and key values need URL escaping.
+func TestVerify_AppendsProxyKeyToPathStyleRoute(t *testing.T) {
+	var gotURI string
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		writeRelaySuccess(t, w)
+	}))
+	defer relay.Close()
+
+	client := mustClient(t,
+		WithSkipPrimary(true),
+		WithProxyKey("abc 123/x+y"),
+		WithRoutes([]Route{{URL: relay.URL + "/receipt/"}}),
+	)
+	if _, err := client.Verify(context.Background(), testReference); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+
+	want := "/receipt/" + testReference + "?key=" + url.QueryEscape("abc 123/x+y")
+	if gotURI != want {
+		t.Errorf("RequestURI = %q, want %q", gotURI, want)
+	}
+}
+
+func TestVerify_DomainRejectionOnly_ReturnsNotFound(t *testing.T) {
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"success": false,
 			"error":   "receipt not found",
@@ -265,7 +291,7 @@ func TestVerify_DomainRejectionOnly_ReturnsNotFound(t *testing.T) {
 }
 
 func TestVerify_TransportFailureOnly_Propagates(t *testing.T) {
-	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	dead := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	dead.Close() // guaranteed refused connections
 
 	client := mustClient(t,
@@ -288,10 +314,10 @@ func TestVerify_TransportFailureOnly_Propagates(t *testing.T) {
 }
 
 func TestVerify_DomainPlusTransport_ReturnsNotFound(t *testing.T) {
-	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	dead := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	dead.Close()
 
-	domainRejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	domainRejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "nope"})
 	}))
 	defer domainRejecting.Close()
@@ -341,7 +367,7 @@ func TestVerify_CancelledBeforeCall(t *testing.T) {
 }
 
 func TestVerify_CancelledDuringPrimary(t *testing.T) {
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
 	defer slow.Close()
@@ -368,7 +394,7 @@ func TestVerify_CancelledDuringPrimary(t *testing.T) {
 
 func TestVerify_FastRouteWinsWhileSlowSiblingCancelled(t *testing.T) {
 	siblingDone := make(chan struct{})
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 		case <-time.After(10 * time.Second):
@@ -423,13 +449,13 @@ func TestVerify_ConcurrentCallsShareStateSafely(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errs := make(chan error, 16)
-	for i := range cap(errs) {
+	for range cap(errs) {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			_, err := client.Verify(context.Background(), testReference)
 			errs <- err
-		}(i)
+		}()
 	}
 	wg.Wait()
 	close(errs)
@@ -444,7 +470,7 @@ func TestVerify_ConcurrentCallsShareStateSafely(t *testing.T) {
 func TestProbe_RouteStatuses(t *testing.T) {
 	good := relayServer(t)
 	defer good.Close()
-	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer bad.Close()
@@ -494,7 +520,7 @@ func TestFetchRoute_OutcomeClassification(t *testing.T) {
 	}{
 		{
 			name: "json envelope parsed",
-			handler: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
 				writeRelaySuccess(t, w)
 			},
 			wantReceipt: true,
@@ -502,14 +528,14 @@ func TestFetchRoute_OutcomeClassification(t *testing.T) {
 		},
 		{
 			name: "domain rejection",
-			handler: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
 				_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": "not found", "details": "db"})
 			},
 			wantKind: ErrorDomain,
 		},
 		{
 			name: "html fallback scraped",
-			handler: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(htmlBody))
 			},
 			wantReceipt: true,
@@ -517,7 +543,7 @@ func TestFetchRoute_OutcomeClassification(t *testing.T) {
 		},
 		{
 			name: "malformed json scraped as html",
-			handler: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte("{not json"))
 			},
 			wantReceipt: true,
@@ -531,7 +557,7 @@ func TestFetchRoute_OutcomeClassification(t *testing.T) {
 		},
 		{
 			name: "server error classified transport",
-			handler: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusInternalServerError)
 			},
 			wantKind: ErrorTransport,
@@ -549,9 +575,9 @@ func TestFetchRoute_OutcomeClassification(t *testing.T) {
 
 			switch {
 			case tt.wantRejected:
-				var rejected errRejected
+				var rejected requestRejectedError
 				if !errors.As(err, &rejected) {
-					t.Fatalf("error = %v, want errRejected", err)
+					t.Fatalf("error = %v, want requestRejectedError", err)
 				}
 			case tt.wantKind != 0:
 				var verificationErr *VerificationError
@@ -665,7 +691,7 @@ func TestNewFromEnv_LayersOptionsOverEnvironment(t *testing.T) {
 
 func TestVerify_ProxyTimeoutBoundsAttempt(t *testing.T) {
 	hung := make(chan struct{})
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		<-hung
 	}))
 	defer slow.Close()
@@ -707,5 +733,59 @@ func ExampleNew() {
 		fmt.Println("verification failed:", err)
 	default:
 		fmt.Println(receipt.PayerName, receipt.SettledAmount)
+	}
+}
+
+// Regression: HTTP 429 is transport-classifiable so the circuit breaker
+// learns about rate limiting instead of silently moving on.
+func TestFetchRoute_RateLimitedIsTransport(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client := mustClient(t)
+	_, err := client.fetchRoute(context.Background(),
+		Route{ID: "r", Label: "rate-limited relay", URL: server.URL + "/"}, testReference)
+
+	var verr *VerificationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("err = %v, want *VerificationError", err)
+	}
+	if verr.Kind != ErrorTransport {
+		t.Errorf("Kind = %s, want transport", verr.Kind)
+	}
+}
+
+// Regression: Probe bounds each attempt by the proxy timeout; a hung relay
+// cannot stall the whole probe.
+func TestProbe_BoundedByProxyTimeout(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer func() { close(release); server.Close() }()
+
+	client := mustClient(t,
+		WithSkipPrimary(true),
+		WithProxyTimeout(150*time.Millisecond),
+		WithRoutes([]Route{{URL: server.URL + "/"}}),
+	)
+
+	done := make(chan ProbeDetails, 1)
+	go func() { done <- client.Probe(context.Background(), testReference) }()
+
+	select {
+	case details := <-done:
+		if len(details.Routes) != 1 || details.Routes[0].Status != RouteHealthUnavailable {
+			t.Fatalf("details = %+v, want one unavailable route", details.Routes)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Probe did not return within the proxy timeout bound")
 	}
 }
