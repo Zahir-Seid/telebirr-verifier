@@ -1,7 +1,7 @@
 # telebirr-verifier
 
 [![Go Version](https://img.shields.io/github/go-mod/go-version/Zahir-Seid/telebirr-verifier)](https://go.dev/)
-[![Go Reference](https://pkg.go.dev/badge/github.com/Zahir-Seid/telebirr-verifier.svg)](https://pkg.go.dev/github.com/Zahir-Seid/telebirr-verifier)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Zahir-Seid/telebirr-verifier.svg)](https://pkg.go.dev/github.com/Zahir-Seid/telebirr-verifier/pkg/telebirr)
 [![License](https://img.shields.io/github/license/Zahir-Seid/telebirr-verifier)](./LICENSE)
 
 A Go library that verifies Ethiopian Telebirr payment receipts by reference number. It queries the official transaction page first and can fall back to a pool of relay endpoints, ported from the original TypeScript implementation.
@@ -19,7 +19,7 @@ A Go library that verifies Ethiopian Telebirr payment receipts by reference numb
 ## Installation
 
 ```bash
-go get github.com/Zahir-Seid/telebirr-verifier
+go get github.com/Zahir-Seid/telebirr-verifier/pkg/telebirr
 ```
 
 ## Usage
@@ -35,7 +35,7 @@ import (
 	"fmt"
 	"time"
 
-	telebirr "github.com/Zahir-Seid/telebirr-verifier"
+	telebirr "github.com/Zahir-Seid/telebirr-verifier/pkg/telebirr"
 )
 
 func main() {

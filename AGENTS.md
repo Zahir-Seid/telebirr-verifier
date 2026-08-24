@@ -17,8 +17,8 @@ For this project, additionally load when applicable:
 
 ## Project conventions
 
-- Module: `github.com/Zahir-Seid/telebirr-verifier`; package name: `telebirr` (root package).
+- Module: `github.com/Zahir-Seid/telebirr-verifier`; package name: `telebirr`, living under `pkg/telebirr/`.
 - Zero external dependencies: standard library only (regex-based HTML extraction, net/http, log/slog).
-- Public API lives at the module root; nothing under internal/.
+- Public API lives in `pkg/telebirr/`; nothing under internal/.
 - All regexes compiled once at package level.
 - Every exported symbol has a doc comment; run `gofmt -s -w .` and `go vet ./...` and `go test -race ./...` before committing.
