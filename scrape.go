@@ -9,10 +9,13 @@ import (
 
 // Receipt page labels. Each appears in a label cell followed by a value cell.
 const (
-	labelPayerName              = "የከፋይ ስም/Payer Name"
-	labelPayerTelebirrNo        = "የከፋይ ቴሌብር ቁ./Payer telebirr no."
-	labelCreditedPartyName      = "የገንዘብ ተቀባይ ስም/Credited Party name"
-	labelCreditedPartyAccountNo = "የገንዘብ ተቀባይ ቴሌብር ቁ./Credited party account no"
+	labelPayerName       = "የከፋይ ስም/Payer Name"
+	labelPayerTelebirrNo = "የከፋይ ቴሌብር ቁ./Payer telebirr no."
+	// gosec flags identifiers mentioning account numbers or party names as
+	// potential credentials; these are HTML table labels scraped from the
+	// receipt page.
+	labelCreditedPartyName      = "የገንዘብ ተቀባይ ስም/Credited Party name"            //nolint:gosec // receipt page label, not a credential
+	labelCreditedPartyAccountNo = "የገንዘብ ተቀባይ ቴሌብር ቁ./Credited party account no" //nolint:gosec // receipt page label, not a credential
 	labelTransactionStatus      = "የክፍያው ሁኔታ/transaction status"
 	labelBankAccountNumber      = "የባንክ አካውንት ቁጥር/Bank account number"
 	labelServiceFeeVAT          = "የአገልግሎት ክፍያ ተ.እ.ታ/Service fee VAT"
